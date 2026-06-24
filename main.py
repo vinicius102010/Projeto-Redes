@@ -9,7 +9,7 @@ import uuid
 
 # configs e estado global
 PORTA_BROADCAST = 50000
-IP_BROADCAST = "127.255.255.255"
+IP_BROADCAST =  os.getenv("IP_BROADCAST","127.255.255.255")
 PASTA_COMPARTILHADA = "./one_piece_drive"
 meu_id = str(uuid.uuid4())[:8]
 nos_conhecidos = {}  # Formato: {'id': {'ip': '...', 'tcp_port': 1234, 'ultima_vez': ...}}

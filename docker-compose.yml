@@ -1,0 +1,38 @@
+version: "3.8"
+
+services:
+  no_a:
+    build: .
+    environment:
+      - IP_BROADCAST=172.28.255.255
+    volumes:
+      # Mapeia uma pasta do seu Windows (./drive_A) para a pasta do container (/app/meu_drive)
+      - ./drive_A:/app/one_piece_drive
+    networks:
+      - rede_p2p
+
+  no_b:
+    build: .
+    environment:
+      - IP_BROADCAST=172.28.255.255
+    volumes:
+      - ./drive_B:/app/one_piece_drive
+    networks:
+      - rede_p2p
+
+  no_c:
+    build: .
+    environment:
+      - IP_BROADCAST=172.28.255.255
+    volumes:
+      - ./drive_C:/app/one_piece_drive
+    networks:
+      - rede_p2p
+
+# Cria uma rede Linux virtual isolada para os 3 computadores conversarem
+networks:
+  rede_p2p:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
