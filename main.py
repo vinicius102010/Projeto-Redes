@@ -15,6 +15,9 @@ meu_id = str(uuid.uuid4())[:8]
 nos_conhecidos = {}  # Formato: {'id': {'ip': '...', 'tcp_port': 1234, 'ultima_vez': ...}}
 lock = threading.Lock()
 meu_tcp_port = 0
+socket_tracker_global = None
+TRACKER_HOST = os.getenv("TRACKER_HOST", "127.0.0.1")
+TRACKER_PORT = int(os.getenv("TRACKER_PORT", 9000))
 
 # garantir que a pasta existe
 if not os.path.exists(PASTA_COMPARTILHADA):
@@ -47,44 +50,6 @@ def escanear_pasta():
                     "modificado_em": os.path.getmtime(caminho_completo),
                 }
     return estado_atual
-
-
-# descoberta dos outros nos
-def ouvinte_udp():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    if hasattr(socket, "SO_REUSEPORT"):
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    sock.bind(("", PORTA_BROADCAST))
-    while True:
-        try:
-            dados, ip_origem = sock.recvfrom(1024)
-            msg = json.loads(dados.decode("utf-8"))
-            if msg["id"] == meu_id:
-                continue
-            with lock:
-                nos_conhecidos[msg["id"]] = {
-                    "ip": ip_origem[0],
-                    "tcp_port": msg[
-                        "tcp_port"
-                    ],  # pega a porta tcp do nó que tá anunciando
-                    "ultima_vez": time.time(),
-                }
-        except:
-            pass
-
-
-def anunciante_udp():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    while True:
-        if meu_tcp_port != 0:
-            msg = json.dumps({"id": meu_id, "tcp_port": meu_tcp_port})
-            try:
-                sock.sendto(msg.encode("utf-8"), (IP_BROADCAST, PORTA_BROADCAST))
-            except:
-                pass
-        time.sleep(5)
 
 
 def iniciar_servidor_tcp():
@@ -161,53 +126,98 @@ def baixar_arquivo(ip, porta, arquivo_relativo, tamanho_esperado):
     finally:
         cliente.close()
 
-
-def sincronização():
+def monitor_eventos():
+    global socket_tracker_global
+    estado_anterior = escanear_pasta()
     while True:
-        time.sleep(10)
-
-        with lock:
-            if not nos_conhecidos:
-                continue
-            id_alvo = random.choice(list(nos_conhecidos.keys()))
-            alvo = nos_conhecidos[id_alvo]
-
+        time.sleep(3)
+        if socket_tracker_global is None: continue
+        estado_atual = escanear_pasta()
+        arquivos_deletados = [arq for arq in estado_anterior if arq not in estado_atual]
+        arquivos_novos = [arq for arq in estado_atual if arq not in estado_anterior]
+        arquivos_modificados = []
+        for arq in estado_atual:
+            if arq in estado_anterior and estado_atual[arq]['hash']!=estado_anterior[arq]['hash']:
+                arquivos_modificados.append(arq)
+                
+        renomeados=[]
+        for deletado in arquivos_deletados[:]:
+            for novo in arquivos_novos[:]:
+                if estado_anterior[deletado]['hash'] == estado_atual[novo]['hash']:
+                    renomeados.append((deletado, novo))
+                    arquivos_deletados.remove(deletado)
+                    arquivos_novos.remove(novo)
+                    break
+        eventos_tracker = []
+        for antigo, novo in renomeados:eventos_tracker.append({"acao": "RENAME", "arquivo": antigo, "novo_nome": novo})
+        for arq in arquivos_deletados: eventos_tracker.append({"acao": "DELETE", "arquivo": arq})
+        for arq in arquivos_novos: eventos_tracker.append({"acao": "CREATE", "arquivo": arq, "tamanho": estado_atual[arq]['tamanho']})
+        for arq in arquivos_modificados: eventos_tracker.append({"acao": "MODIFY", "arquivo": arq, "tamanho": estado_atual[arq]['tamanho']})
+        
+        for evento in eventos_tracker:
+            evento["remetente"] = meu_id
+            evento["tcp_port"] = meu_tcp_port 
+            evento["ip"] = socket_tracker_global.getsockname()[0]
+            try:
+                msg = json.dumps(evento)
+                socket_tracker_global.sendall(msg.encode('utf-8'))
+                print(f"[{meu_id}] Enviei evento para o Tracker: {evento['acao']} em '{evento['arquivo']}'")
+            except Exception as e:
+                pass
+        estado_anterior = estado_atual
+ 
+def escutar_tracker():
+    global socket_tracker_global
+    while True:
+        cliente_tracker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            cliente = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            cliente.connect((alvo["ip"], alvo["tcp_port"]))
-            cliente.sendall(json.dumps({"acao": "GET_INDEX"}).encode("utf-8"))
-
-            resposta_raw = cliente.recv(65536)
-            cliente.close()
-
-            msg = json.loads(resposta_raw.decode("utf-8"))
-            index_colega = msg.get("dados", {})
-            meu_index = escanear_pasta()
-
-            para_baixar = []
-            for arquivo, info_colega in index_colega.items():
-                if arquivo not in meu_index:
-                    para_baixar.append((arquivo, info_colega["tamanho"]))
-                elif (
-                    meu_index[arquivo]["hash"] != info_colega["hash"]
-                    and info_colega["modificado_em"]
-                    > meu_index[arquivo]["modificado_em"]
-                ):
-                    para_baixar.append((arquivo, info_colega["tamanho"]))
-
-            for arquivo, tamanho in para_baixar:
-                baixar_arquivo(alvo["ip"], alvo["tcp_port"], arquivo, tamanho)
+            print(f"[{meu_id}] Tentando conectar ao tracker")
+            cliente_tracker.connect((TRACKER_HOST, TRACKER_PORT))
+            socket_tracker_global = cliente_tracker
+            msg_registro = json.dumps({"acao": "REGISTRO", "id": meu_id})
+            cliente_tracker.sendall(msg_registro.encode('utf-8'))
+            print(f"[{meu_id}] Conectado ao tracker com sucesso")
+            while True:
+                dados = cliente_tracker.recv(4096)
+                if not dados:
+                    print(f"[{meu_id}] Conexao perdida, tentando reconectar")
+                    break
+                evento = json.loads(dados.decode('utf-8'))
+                acao = evento.get('acao')
+                arquivo = evento.get('arquivo')
+                ip_remetente = evento.get('ip')
+                porta_remetente = evento.get('tcp_port')
+                print(f"[{meu_id}] O nó {evento.get('remetente')} mandou fazer {acao} no arquivo{arquivo}")
+                caminho_completo = os.path.join(PASTA_COMPARTILHADA, arquivo)
+                try:
+                    if acao == 'DELETE':
+                        if os.path.exists(caminho_completo):
+                            os.remove(caminho_completo)
+                            print(f"[{meu_id}] Arquivo {arquivo} foi apagado.")
+                    elif acao == 'RENAME':
+                        novo_nome = evento.get('novo_nome')
+                        caminho_novo = os.path.join(PASTA_COMPARTILHADA, novo_nome)
+                        if os.path.exists(caminho_completo) and not os.path.exists(caminho_novo):
+                            os.rename(caminho_completo, caminho_novo)
+                            print(f"[{meu_id}] Arquivo {arquivo} renomeado com sucesso.")
+                    elif acao in ['CREATE', 'MODIFY']:
+                        tamanho = evento.get('tamanho')
+                        if not os.path.exists(caminho_completo) or os.path.getsize(caminho_completo) != tamanho:
+                            if ip_remetente:
+                                baixar_arquivo(ip_remetente, porta_remetente, arquivo, tamanho)
+                except Exception as e:
+                    print(f"[{meu_id}] Erro ao tentar fazer {acao} no arquivo {arquivo}: {e}")   
         except Exception as e:
-            pass
-
-
+            time.sleep(5)
+        finally:
+            cliente_tracker.close()
+            
 if __name__ == "__main__":
-    threading.Thread(target=ouvinte_udp, daemon=True).start()
     threading.Thread(target=iniciar_servidor_tcp, daemon=True).start()
 
     time.sleep(1)
-    threading.Thread(target=anunciante_udp, daemon=True).start()
-    threading.Thread(target=sincronização, daemon=True).start()
+    threading.Thread(target=escutar_tracker, daemon=True).start()
+    threading.Thread(target=monitor_eventos, daemon=True).start()
 
     try:
         while True:
