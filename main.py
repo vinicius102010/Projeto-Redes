@@ -30,12 +30,17 @@ def gerar_hash_arquivo(caminho_arquivo):
             for chunk in iter(lambda: f.read(4096), b""):
                 hash_md5.update(chunk)
         return hash_md5.hexdigest()
+    except PermissionError:
+        #se der erro de permissao fica calado
+        return None
     except Exception as e:
         print(f"Erro gerando o hash: {e}")
         return None
 
 
-def escanear_pasta():
+def escanear_pasta(estado_anterior = None):
+    if estado_anterior is None:
+        estado_anterior = {}
     estado_atual = {}
     for raiz, _, arquivos in os.walk(
         PASTA_COMPARTILHADA
@@ -47,13 +52,24 @@ def escanear_pasta():
 
             caminho_completo = os.path.join(raiz, arquivo)
             caminho_relativo = os.path.relpath(caminho_completo, PASTA_COMPARTILHADA)
-            hash_arquivo = gerar_hash_arquivo(caminho_completo)
-            if hash_arquivo:
-                estado_atual[caminho_relativo] = {
-                    "hash": hash_arquivo,
-                    "tamanho": os.path.getsize(caminho_completo),
-                    "modificado_em": os.path.getmtime(caminho_completo),
-                }
+            try:
+                data_modificacao = os.path.getmtime(caminho_completo)
+                tamanho = os.path.getsize(caminho_completo)
+                if (caminho_relativo in estado_anterior 
+                    and estado_anterior[caminho_relativo]['modificado_em'] == data_modificacao
+                    and estado_anterior[caminho_relativo]['tamanho'] == tamanho):
+                    hash_arquivo = estado_anterior[caminho_relativo]['hash']
+                else:
+                    hash_arquivo = gerar_hash_arquivo(caminho_completo)
+                if hash_arquivo:
+                    estado_atual[caminho_relativo] = {
+                        "hash": hash_arquivo,
+                        "tamanho": tamanho,
+                        "modificado_em": data_modificacao,
+                    }
+                
+            except Exception as e:
+                pass #se der erro ignora e finge que nada aconteceu
     return estado_atual
 
 
@@ -153,7 +169,7 @@ def monitor_eventos():
         time.sleep(3)
         if socket_tracker_global is None:
             continue
-        estado_atual = escanear_pasta()
+        estado_atual = escanear_pasta(estado_anterior)
         arquivos_deletados = [arq for arq in estado_anterior if arq not in estado_atual]
         arquivos_novos = [arq for arq in estado_atual if arq not in estado_anterior]
         arquivos_modificados = []
@@ -163,7 +179,7 @@ def monitor_eventos():
                 and estado_atual[arq]["hash"] != estado_anterior[arq]["hash"]
             ):
                 arquivos_modificados.append(arq)
-
+        #cruza quem sumiu com quem apareceu pra ver se o hash é o mesmo
         arquivos_renomeados = []
         for deletado in arquivos_deletados[:]:
             for novo in arquivos_novos[:]:
@@ -204,7 +220,7 @@ def monitor_eventos():
                 msg = json.dumps(evento)
                 socket_tracker_global.sendall(msg.encode("utf-8"))
                 print(
-                    f"[{meu_id}] Enviei evento para o Tracker: {evento['acao']} em '{evento['arquivo']}'"
+                    f"[{meu_id}] mandou o evento: {evento['acao']} no arquivo '{evento['arquivo']}'"
                 )
             except Exception as e:
                 print(f"Erro ao enviar evento: {e}")
@@ -216,16 +232,15 @@ def escutar_tracker():
     while True:
         cliente_tracker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            print(f"[{meu_id}] Tentando conectar ao tracker")
             cliente_tracker.connect((TRACKER_HOST, TRACKER_PORT))
             socket_tracker_global = cliente_tracker
             msg_registro = json.dumps({"acao": "REGISTRO", "id": meu_id})
             cliente_tracker.sendall(msg_registro.encode("utf-8"))
-            print(f"[{meu_id}] Conectado ao tracker com sucesso")
+            print(f"[{meu_id}] Logado no tracker")
             while True:
                 dados = cliente_tracker.recv(4096)
                 if not dados:
-                    print(f"[{meu_id}] Conexao perdida, tentando reconectar")
+                    print(f"[{meu_id}] caiu, tentando reconectar")
                     break
                 evento = json.loads(dados.decode("utf-8"))
                 acao = evento.get("acao")
@@ -233,14 +248,14 @@ def escutar_tracker():
                 ip_remetente = evento.get("ip")
                 porta_remetente = evento.get("tcp_port")
                 print(
-                    f"[{meu_id}] O nó {evento.get('remetente')} mandou fazer {acao} no arquivo{arquivo}"
+                    f"[{meu_id}] Aviso: {acao}  no {arquivo} enviado por {evento.get('remetente')}"
                 )
                 caminho_completo = os.path.join(PASTA_COMPARTILHADA, arquivo)
                 try:
                     if acao == "DELETE":
                         if os.path.exists(caminho_completo):
                             os.remove(caminho_completo)
-                            print(f"[{meu_id}] Arquivo {arquivo} foi apagado.")
+                            print(f"[{meu_id}] {arquivo} foi apagado.")
                     elif acao == "RENAME":
                         novo_nome = evento.get("novo_nome")
                         caminho_novo = os.path.join(PASTA_COMPARTILHADA, novo_nome)
@@ -249,7 +264,7 @@ def escutar_tracker():
                         ):
                             os.rename(caminho_completo, caminho_novo)
                             print(
-                                f"[{meu_id}] Arquivo {arquivo} renomeado com sucesso."
+                                f"[{meu_id}] renomeado para {novo_nome}."
                             )
                     elif acao in ["CREATE", "MODIFY"]:
                         tamanho = evento.get("tamanho")
@@ -263,7 +278,7 @@ def escutar_tracker():
                                 )
                 except Exception as e:
                     print(
-                        f"[{meu_id}] Erro ao tentar fazer {acao} no arquivo {arquivo}: {e}"
+                        f"[{meu_id}] deu erro durante o {acao} : {e}"
                     )
         except Exception as e:
             print(f"Erro na conexao com o tracker: {e}")
@@ -283,4 +298,4 @@ if __name__ == "__main__":
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\nEncerrando nó...")
+        print("\nmatando o nó...")

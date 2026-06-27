@@ -16,7 +16,7 @@ def conectar_com_no(conexao, endereco):
             id_no = msg_inicial['id']
             with lock:
                 nos_conectados[id_no] = conexao
-            print(f"[Tracker] Nó '{id_no} conectou'")
+            print(f"[Tracker] Nó '{id_no} entrou'")
             
         while True:
             dados = conexao.recv(4096)
@@ -25,11 +25,11 @@ def conectar_com_no(conexao, endereco):
             evento = json.loads(dados.decode('utf-8'))
             acao = evento.get('acao')
             arquivo = evento.get('arquivo')
-            print(f"[Tracker]  Evento recebido de {id_no}: {acao} no arquivo '{arquivo}'")
+            print(f"[Tracker]  repassando {acao} em '{arquivo}' de {id_no}")
             transmitir_evento(evento, remetente_id=id_no)
             
     except Exception as e:
-        print(f"[Tracker]  Erro na conexão com {id_no} ou {endereco}: {e}")
+        print(f"[Tracker]  nao conectou no {id_no}: {e}")
     finally:
         if id_no:
             with lock:
@@ -56,7 +56,7 @@ def iniciar_tracker():
     servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     servidor.bind(('0.0.0.0', PORTA_TRACKER))
     servidor.listen()
-    print(f"Tracker iniciado na porta {PORTA_TRACKER}")
+    print(f"Tracker online na porta {PORTA_TRACKER}")
     while True:
         conexao, endereco = servidor.accept()
         threading.Thread(target=conectar_com_no, args=(conexao, endereco), daemon=True).start()
